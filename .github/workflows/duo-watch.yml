@@ -1,0 +1,57 @@
+name: duo-watch
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check Apple Store pickup
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.parse, urllib.request
+
+          # iPhone Duo 1TB (Japan): Star White / Night Sky
+          PARTS = {"MK284J/A": "Star White 1TB", "MK294J/A": "Night Sky 1TB"}
+          # Search anchors around Tokyo (Apple returns nearby stores for each)
+          LOCATIONS = ["100-0005", "104-0061", "150-0002", "160-0022", "210-0007", "221-0056"]
+          UA = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 19_0 like Mac OS X) AppleWebKit/605.1.15"}
+
+          stores_seen, hits, ok = set(), [], 0
+          for loc in LOCATIONS:
+              q = [("pl", "true"), ("mts.0", "regular"), ("mts.1", "compact"), ("location", loc)]
+              q += [(f"parts.{i}", p) for i, p in enumerate(PARTS)]
+              url = "https://www.apple.com/jp/shop/fulfillment-messages?" + urllib.parse.urlencode(q)
+              try:
+                  data = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=20))
+                  stores = data["body"]["content"]["pickupMessage"]["stores"]
+                  ok += 1
+              except Exception as e:
+                  print("fetch failed", loc, e)
+                  continue
+              for s in stores:
+                  stores_seen.add(s.get("storeName"))
+                  for part, info in s.get("partsAvailability", {}).items():
+                      if info.get("pickupDisplay") == "available":
+                          hits.append(f'{s["storeName"]}: {PARTS.get(part, part)}')
+
+          print("stores seen:", sorted(x for x in stores_seen if x))
+          hits = sorted(set(hits))
+          print("hits:", hits)
+          if ok == 0:
+              sys.exit(1)  # all requests failed -> run shows red / GitHub emails you
+          if hits and os.environ.get("NTFY_TOPIC"):
+              req = urllib.request.Request(
+                  "https://ntfy.sh/" + os.environ["NTFY_TOPIC"],
+                  data="\n".join(hits).encode("utf-8"),
+                  headers={"Title": "iPhone Duo pickup AVAILABLE", "Priority": "urgent",
+                           "Tags": "iphone,rotating_light",
+                           "Click": "https://www.apple.com/jp/shop/buy-iphone/iphone-duo"},
+              )
+              urllib.request.urlopen(req, timeout=20)
+          PY
